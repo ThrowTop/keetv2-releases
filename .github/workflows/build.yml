@@ -185,7 +185,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $publish = if ('${{ inputs.publish }}' -eq 'true') { @('--publish') } else { @() }
+          $publish = @(if ('${{ inputs.publish }}' -eq 'true') { '--publish' })
           dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
             --token '${{ github.token }}' --outputDir dist\releases --tag 'v${{ inputs.version }}' `
             --releaseName 'keetv2 ${{ inputs.version }}' --targetCommitish '${{ github.sha }}' @publish
