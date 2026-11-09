@@ -38,7 +38,7 @@ jobs:
           function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path) {
             $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
             [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
-            $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile -replace '\', '/')' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
             New-Item -ItemType Directory -Force -Path $Path | Out-Null
             git -C $Path init -q
             git -C $Path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
