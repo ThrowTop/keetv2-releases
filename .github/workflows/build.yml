@@ -19,7 +19,7 @@ on:
       publish:
         description: Publish (installed copies update to it); otherwise a draft
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write
@@ -83,13 +83,15 @@ jobs:
           MACUIKIT_REF: ${{ inputs.macuikit_ref }}
         run: |
           $ErrorActionPreference = 'Stop'
-          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path) {
+          # keetv2 and MacUIKit with their commit history (no older trees or files) for the release
+          # notes; the build inputs as a single commit.
+          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path, [string]$Filter = '--filter=tree:0') {
             $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
             [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
             $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
             New-Item -ItemType Directory -Force -Path $Path | Out-Null
             git -C $Path init -q
-            git -C $Path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
+            git -C $Path fetch -q $Filter "git@github.com:$Repository.git" $Ref
             if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
             git -C $Path checkout -q FETCH_HEAD
             $sha = git -C $Path rev-parse --short HEAD
@@ -100,7 +102,7 @@ jobs:
           git config --global core.autocrlf false
           Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF 'C:\custom\code\keetv2'
           Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
-          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research'
+          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research' '--depth=1'
 
       - uses: actions/download-artifact@v8
         with:
@@ -142,18 +144,51 @@ jobs:
           dotnet vpk download github --repoUrl '${{ github.server_url }}/${{ github.repository }}' --outputDir dist\releases
           if ($LASTEXITCODE) { Write-Host 'No previous release.'; $global:LASTEXITCODE = 0 }
 
+      # The commit subjects since the newest published release, whose notes end in a hidden line
+      # naming the commits it was built from. These subjects become public.
+      - name: Release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previous = gh api 'repos/${{ github.repository }}/releases/latest' --jq .body 2>$null
+          $global:LASTEXITCODE = 0
+          $lines = [System.Collections.Generic.List[string]]::new()
+          $built = @()
+          foreach ($source in @(@{ Name = 'keetv2'; Path = 'C:\custom\code\keetv2' }, @{ Name = 'MacUIKit'; Path = 'C:\custom\code\MacUIKit' })) {
+            $head = git -C $source.Path rev-parse HEAD
+            $built += "$($source.Name) $head"
+            $since = if ("$previous" -match "$($source.Name) ([0-9a-f]{40})") { $Matches[1] }
+            if (-not $since) { continue }
+            git -C $source.Path merge-base --is-ancestor $since $head 2>$null
+            if ($LASTEXITCODE) { $global:LASTEXITCODE = 0; continue }
+            $subjects = @(git -C $source.Path log --no-merges --format='- %s' "$since..$head")
+            if ($subjects) { $lines.Add("## $($source.Name)"); $lines.Add(''); $lines.AddRange([string[]]$subjects); $lines.Add('') }
+          }
+          if (-not $lines.Count) { $lines.Add('No changes listed.'); $lines.Add('') }
+          $lines.Add("<!-- built from $($built -join ', ') -->")
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [IO.File]::WriteAllLines($notes, $lines)
+          "RELEASE_NOTES=$notes" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      # No tests or development tools: only what ships.
       - name: Build and package
         shell: pwsh
-        run: pwsh C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version '${{ inputs.version }}'
+        run: >
+          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version '${{ inputs.version }}'
+          -ReleaseNotes $env:RELEASE_NOTES -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF')
 
       # Installed copies update from published releases only; a draft waits for the owner.
       - name: Release
         shell: pwsh
         working-directory: C:\custom\code\keetv2\desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $publish = if ('${{ inputs.publish }}' -eq 'true') { @('--publish') } else { @() }
           dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
             --token '${{ github.token }}' --outputDir dist\releases --tag 'v${{ inputs.version }}' `
             --releaseName 'keetv2 ${{ inputs.version }}' --targetCommitish '${{ github.sha }}' @publish
           if ($LASTEXITCODE) { throw 'vpk upload failed.' }
-          Write-Host "keetv2 $env:keetv2_sha, MacUIKit $env:macuikit_sha"
+          gh release edit 'v${{ inputs.version }}' --repo '${{ github.repository }}' --notes-file $env:RELEASE_NOTES
+          Get-Content $env:RELEASE_NOTES
