@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version (x.y.z)
-        required: true
+        description: Version (x.y.z); empty is the last release plus one patch
+        required: false
       keetv2_ref:
         description: keetv2 commit or branch
         default: master
@@ -174,9 +174,15 @@ jobs:
       # No tests or development tools: only what ships.
       - name: Build and package
         shell: pwsh
-        run: >
-          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version '${{ inputs.version }}'
-          -ReleaseNotes $env:RELEASE_NOTES -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF')
+        # dev.ps1 picks the version when none is given: the downloaded release's plus one patch.
+        run: |
+          $version = @(if ('${{ inputs.version }}') { '-Version'; '${{ inputs.version }}' })
+          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package @version -ReleaseNotes $env:RELEASE_NOTES `
+            -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF')
+          $built = Get-ChildItem C:\custom\code\keetv2\desktop\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
+            ForEach-Object { if ($_.Name -match '-(\d+\.\d+\.\d+)-full\.nupkg$') { [version]$Matches[1] } } |
+            Sort-Object -Descending | Select-Object -First 1
+          "VERSION=$built" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       # Installed copies update from published releases only; a draft waits for the owner.
       - name: Release
@@ -187,8 +193,8 @@ jobs:
         run: |
           $publish = @(if ('${{ inputs.publish }}' -eq 'true') { '--publish' })
           dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
-            --token '${{ github.token }}' --outputDir dist\releases --tag 'v${{ inputs.version }}' `
-            --releaseName 'keetv2 ${{ inputs.version }}' --targetCommitish '${{ github.sha }}' @publish
+            --token '${{ github.token }}' --outputDir dist\releases --tag "v$env:VERSION" `
+            --releaseName "keetv2 $env:VERSION" --targetCommitish '${{ github.sha }}' @publish
           if ($LASTEXITCODE) { throw 'vpk upload failed.' }
-          gh release edit 'v${{ inputs.version }}' --repo '${{ github.repository }}' --notes-file $env:RELEASE_NOTES
+          gh release edit "v$env:VERSION" --repo '${{ github.repository }}' --notes-file $env:RELEASE_NOTES
           Get-Content $env:RELEASE_NOTES
