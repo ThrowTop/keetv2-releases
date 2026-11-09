@@ -21,7 +21,49 @@ permissions:
   contents: write
 
 jobs:
+  # keetv2's slim LGPL FFmpeg (desktop/tools/ffmpeg/build.sh) in BtbN's build image, as keetv2's
+  # own ffmpeg.yml does; cached by the script's hash, so it is rebuilt only when the script changes.
+  # Only the FFmpeg build leaves this job, as a one-day artifact for the Windows job.
+  ffmpeg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      FFMPEG_TAG: n9.0.2
+    steps:
+      - name: Fetch the build script
+        env:
+          KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
+          KEETV2_REF: ${{ inputs.keetv2_ref }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/keetv2-key"; printf '%s
+' "$KEETV2_KEY" > "$key"; chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          src="$RUNNER_TEMP/keetv2"; git init -q "$src"
+          git -C "$src" fetch -q --depth 1 git@github.com:ThrowTop/keetv2.git "$KEETV2_REF"
+          git -C "$src" checkout -q FETCH_HEAD
+          rm -f "$key"
+          cp "$src/desktop/tools/ffmpeg/build.sh" "$RUNNER_TEMP/ffmpeg-build.sh"
+          rm -rf "$src"
+          echo "SCRIPT_HASH=$(sha256sum "$RUNNER_TEMP/ffmpeg-build.sh" | cut -c1-16)" >> "$GITHUB_ENV"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-keetv2
+          key: ffmpeg-keetv2-${{ env.FFMPEG_TAG }}-${{ env.SCRIPT_HASH }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/script:ro" -v "$PWD:/work" -w /work             ghcr.io/btbn/ffmpeg-builds/win64-gpl-shared-9.0:latest             bash /script/ffmpeg-build.sh "$FFMPEG_TAG" /work/ffmpeg-keetv2 > "$RUNNER_TEMP/ffmpeg.log" 2>&1             || { tail -n 40 "$RUNNER_TEMP/ffmpeg.log"; exit 1; }
+          sudo chown -R "$(id -u):$(id -g)" ffmpeg-keetv2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-keetv2
+          path: ffmpeg-keetv2
+          retention-days: 1
+
   windows:
+    needs: ffmpeg
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
@@ -51,6 +93,11 @@ jobs:
           Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF 'C:\custom\code\keetv2'
           Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
           Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-keetv2
+          path: C:\custom\code\keetv2\desktop\depsfmpeg-keetv2-n9.0.2
 
       - uses: jurplel/install-qt-action@v4
         with:
