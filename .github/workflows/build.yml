@@ -24,17 +24,30 @@ on:
 permissions:
   contents: write
 
+# One release at a time: each picks its version and delta base from the newest published release,
+# so two at once would build the same version. A second dispatch waits for the first to finish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   # keetv2's slim LGPL FFmpeg (desktop/tools/ffmpeg/build.sh) in BtbN's build image, as keetv2's
-  # own ffmpeg.yml does; cached by the script's hash, so it is rebuilt only when the script changes.
-  # Only the FFmpeg build leaves this job, as a one-day artifact for the Windows job.
+  # own ffmpeg.yml does. Cached by everything that decides the output (FFmpeg tag, the image by
+  # digest, the script's hash), so a cache hit is the build a miss would make. Only the FFmpeg build
+  # leaves this job, as a one-day artifact for the Windows job, with the keetv2 commit it fetched:
+  # the Windows job builds that same commit, even if the branch moves in between.
   ffmpeg:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      keetv2_sha: ${{ steps.source.outputs.keetv2_sha }}
     env:
       FFMPEG_TAG: n9.0.2
+      # The image digest keetv2's ffmpeg.yml pins too; update both together.
+      FFMPEG_IMAGE: ghcr.io/btbn/ffmpeg-builds/win64-gpl-shared-9.0@sha256:49e23d45202a3399249129ebeb42bc2afd91de642e8d9cea27de43b3ac9051d7
     steps:
       - name: Fetch the build script
+        id: source
         env:
           KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
           KEETV2_REF: ${{ inputs.keetv2_ref }}
@@ -46,19 +59,21 @@ jobs:
           git -C "$src" fetch -q --depth 1 git@github.com:ThrowTop/keetv2.git "$KEETV2_REF"
           git -C "$src" checkout -q FETCH_HEAD
           rm -f "$key"
+          echo "keetv2_sha=$(git -C "$src" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           cp "$src/desktop/tools/ffmpeg/build.sh" "$RUNNER_TEMP/ffmpeg-build.sh"
           rm -rf "$src"
-          echo "SCRIPT_HASH=$(sha256sum "$RUNNER_TEMP/ffmpeg-build.sh" | cut -c1-16)" >> "$GITHUB_ENV"
+          echo "SCRIPT_HASH=$(sha256sum "$RUNNER_TEMP/ffmpeg-build.sh" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "IMAGE_DIGEST=${FFMPEG_IMAGE##*@sha256:}" >> "$GITHUB_ENV"
       - id: cache
         uses: actions/cache@v6
         with:
           path: ffmpeg-keetv2
-          key: ffmpeg-keetv2-${{ env.FFMPEG_TAG }}-${{ env.SCRIPT_HASH }}
+          key: ffmpeg-keetv2-${{ env.FFMPEG_TAG }}-${{ env.IMAGE_DIGEST }}-${{ env.SCRIPT_HASH }}
       - name: Build
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           docker run --rm -v "$RUNNER_TEMP:/script:ro" -v "$PWD:/work" -w /work \
-            ghcr.io/btbn/ffmpeg-builds/win64-gpl-shared-9.0:latest \
+            "$FFMPEG_IMAGE" \
             bash /script/ffmpeg-build.sh "$FFMPEG_TAG" /work/ffmpeg-keetv2 > "$RUNNER_TEMP/ffmpeg.log" 2>&1 \
             || { tail -n 40 "$RUNNER_TEMP/ffmpeg.log"; exit 1; }
           sudo chown -R "$(id -u):$(id -g)" ffmpeg-keetv2
@@ -79,7 +94,8 @@ jobs:
           KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
           MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
           INPUTS_KEY: ${{ secrets.INPUTS_DEPLOY_KEY }}
-          KEETV2_REF: ${{ inputs.keetv2_ref }}
+          # The commit the FFmpeg job fetched, not the branch again.
+          KEETV2_REF: ${{ needs.ffmpeg.outputs.keetv2_sha }}
           MACUIKIT_REF: ${{ inputs.macuikit_ref }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -139,10 +155,19 @@ jobs:
       - name: Previous release
         shell: pwsh
         working-directory: C:\custom\code\keetv2\desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           dotnet tool restore | Out-Null
           dotnet vpk download github --repoUrl '${{ github.server_url }}/${{ github.repository }}' --outputDir dist\releases
-          if ($LASTEXITCODE) { Write-Host 'No previous release.'; $global:LASTEXITCODE = 0 }
+          if ($LASTEXITCODE) {
+            # Only "there is no release yet" may go on (the first release, with no delta). Any other
+            # failure would build the wrong version, or one installed copies cannot update to.
+            gh api 'repos/${{ github.repository }}/releases/latest' --silent 2>$null
+            if (-not $LASTEXITCODE) { throw 'Downloading the previous release failed.' }
+            Write-Host 'No previous release.'
+            $global:LASTEXITCODE = 0
+          }
 
       # The commit subjects since the newest published release, whose notes end in a hidden line
       # naming the commits it was built from. These subjects become public.
@@ -171,14 +196,19 @@ jobs:
           [IO.File]::WriteAllLines($notes, $lines)
           "RELEASE_NOTES=$notes" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      # No tests or development tools: only what ships.
+      # No tests or development tools: only what ships. dev.ps1 runs the staged app as installed
+      # (bare PATH, packaged worker) before packing it.
       - name: Build and package
         shell: pwsh
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         # dev.ps1 picks the version when none is given: the downloaded release's plus one patch.
         run: |
-          $version = @(if ('${{ inputs.version }}') { '-Version'; '${{ inputs.version }}' })
+          if ($env:VERSION_INPUT -and $env:VERSION_INPUT -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be x.y.z.' }
+          $version = @(if ($env:VERSION_INPUT) { '-Version'; $env:VERSION_INPUT })
           & C:\custom\code\keetv2\desktop\dev.ps1 -Task package @version -ReleaseNotes $env:RELEASE_NOTES `
             -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF')
+          if ($LASTEXITCODE) { throw 'Packaging failed.' }
           $built = Get-ChildItem C:\custom\code\keetv2\desktop\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
             ForEach-Object { if ($_.Name -match '-(\d+\.\d+\.\d+)-full\.nupkg$') { [version]$Matches[1] } } |
             Sort-Object -Descending | Select-Object -First 1
@@ -190,8 +220,9 @@ jobs:
         working-directory: C:\custom\code\keetv2\desktop
         env:
           GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
-          $publish = @(if ('${{ inputs.publish }}' -eq 'true') { '--publish' })
+          $publish = @(if ($env:PUBLISH -eq 'true') { '--publish' })
           dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
             --token '${{ github.token }}' --outputDir dist\releases --tag "v$env:VERSION" `
             --releaseName "keetv2 $env:VERSION" --targetCommitish '${{ github.sha }}' @publish
