@@ -61,7 +61,9 @@ jobs:
           modules: qtimageformats qtshadertools
           dir: C:\
           cache: true
-          aqtversion: '>=3.3.0'
+          # aqtinstall 3.3.0 cannot read Qt 6.12's per-compiler repository layout; this is the
+          # head of its open fix (miurahr/aqtinstall#1048). Back to a release once one has it.
+          aqtsource: git+https://github.com/jdpurcell/aqtinstall.git@6f0f842da47c744cdc814cd94da9828d934d7bf0
 
       - uses: actions/setup-node@v4
         with:
