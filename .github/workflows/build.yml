@@ -1,0 +1,89 @@
+name: Build
+
+# Manual only: no pull_request or push triggers, so nothing from a fork ever runs here with the
+# deploy keys. Sources are cloned to the same paths as on the owner's PC (the CMake presets and
+# dev.ps1 name them), so keetv2 needs no CI-specific changes. The build log stays on the runner;
+# only dev.ps1's one-line results (and its first error lines on failure) reach this public log.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version (x.y.z)
+        required: true
+      keetv2_ref:
+        description: keetv2 commit or branch
+        default: master
+      macuikit_ref:
+        description: MacUIKit commit or branch
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - name: Fetch sources
+        shell: pwsh
+        env:
+          KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
+          MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
+          INPUTS_KEY: ${{ secrets.INPUTS_DEPLOY_KEY }}
+          KEETV2_REF: ${{ inputs.keetv2_ref }}
+          MACUIKIT_REF: ${{ inputs.macuikit_ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path) {
+            $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
+            $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile -replace '\', '/')' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            New-Item -ItemType Directory -Force -Path $Path | Out-Null
+            git -C $Path init -q
+            git -C $Path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
+            if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
+            git -C $Path checkout -q FETCH_HEAD
+            Write-Host "$Repository $Ref = $(git -C $Path rev-parse --short HEAD)"
+            Remove-Item -LiteralPath $keyFile -Force
+          }
+          git config --global core.autocrlf false
+          Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF 'C:\custom\code\keetv2'
+          Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
+          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research'
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.12.0
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtimageformats qtshadertools
+          dir: C:\
+          cache: true
+          aqtversion: '>=3.3.0'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Worker dependencies
+        working-directory: C:\custom\code\keetv2\worker
+        run: npm ci --no-audit --no-fund
+
+      - name: Build and package
+        shell: pwsh
+        run: pwsh C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version '${{ inputs.version }}'
+
+      - name: Draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dist = 'C:\custom\code\keetv2\desktop\dist'
+          $files = @(Get-ChildItem $dist -File | Where-Object Name -match '(-Setup\.exe|-portable\.zip)$' | ForEach-Object FullName)
+          gh release create 'v${{ inputs.version }}' @files --draft --repo '${{ github.repository }}' --target '${{ github.sha }}' --title 'keetv2 ${{ inputs.version }}' --notes 'Built from keetv2 ${{ inputs.keetv2_ref }}, MacUIKit ${{ inputs.macuikit_ref }}.'
