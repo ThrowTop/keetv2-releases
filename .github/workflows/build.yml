@@ -36,8 +36,7 @@ jobs:
           KEETV2_REF: ${{ inputs.keetv2_ref }}
         run: |
           set -euo pipefail
-          key="$RUNNER_TEMP/keetv2-key"; printf '%s
-' "$KEETV2_KEY" > "$key"; chmod 600 "$key"
+          key="$RUNNER_TEMP/keetv2-key"; printf '%s\n' "$KEETV2_KEY" > "$key"; chmod 600 "$key"
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           src="$RUNNER_TEMP/keetv2"; git init -q "$src"
           git -C "$src" fetch -q --depth 1 git@github.com:ThrowTop/keetv2.git "$KEETV2_REF"
@@ -54,7 +53,10 @@ jobs:
       - name: Build
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          docker run --rm -v "$RUNNER_TEMP:/script:ro" -v "$PWD:/work" -w /work             ghcr.io/btbn/ffmpeg-builds/win64-gpl-shared-9.0:latest             bash /script/ffmpeg-build.sh "$FFMPEG_TAG" /work/ffmpeg-keetv2 > "$RUNNER_TEMP/ffmpeg.log" 2>&1             || { tail -n 40 "$RUNNER_TEMP/ffmpeg.log"; exit 1; }
+          docker run --rm -v "$RUNNER_TEMP:/script:ro" -v "$PWD:/work" -w /work \
+            ghcr.io/btbn/ffmpeg-builds/win64-gpl-shared-9.0:latest \
+            bash /script/ffmpeg-build.sh "$FFMPEG_TAG" /work/ffmpeg-keetv2 > "$RUNNER_TEMP/ffmpeg.log" 2>&1 \
+            || { tail -n 40 "$RUNNER_TEMP/ffmpeg.log"; exit 1; }
           sudo chown -R "$(id -u):$(id -g)" ffmpeg-keetv2
       - uses: actions/upload-artifact@v4
         with:
@@ -97,7 +99,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-keetv2
-          path: C:\custom\code\keetv2\desktop\depsfmpeg-keetv2-n9.0.2
+          path: C:\custom\code\keetv2\desktop\deps\ffmpeg-keetv2-n9.0.2
 
       - uses: jurplel/install-qt-action@v4
         with:
