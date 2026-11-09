@@ -46,7 +46,7 @@ jobs:
           rm -rf "$src"
           echo "SCRIPT_HASH=$(sha256sum "$RUNNER_TEMP/ffmpeg-build.sh" | cut -c1-16)" >> "$GITHUB_ENV"
       - id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ffmpeg-keetv2
           key: ffmpeg-keetv2-${{ env.FFMPEG_TAG }}-${{ env.SCRIPT_HASH }}
@@ -58,7 +58,7 @@ jobs:
             bash /script/ffmpeg-build.sh "$FFMPEG_TAG" /work/ffmpeg-keetv2 > "$RUNNER_TEMP/ffmpeg.log" 2>&1 \
             || { tail -n 40 "$RUNNER_TEMP/ffmpeg.log"; exit 1; }
           sudo chown -R "$(id -u):$(id -g)" ffmpeg-keetv2
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ffmpeg-keetv2
           path: ffmpeg-keetv2
@@ -96,7 +96,7 @@ jobs:
           Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
           Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research'
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ffmpeg-keetv2
           path: C:\custom\code\keetv2\desktop\deps\ffmpeg-keetv2-n9.0.2
@@ -114,11 +114,11 @@ jobs:
           # head of its open fix (miurahr/aqtinstall#1048). Back to a release once one has it.
           aqtsource: git+https://github.com/jdpurcell/aqtinstall.git@6f0f842da47c744cdc814cd94da9828d934d7bf0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
