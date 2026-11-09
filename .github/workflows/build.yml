@@ -16,6 +16,10 @@ on:
       macuikit_ref:
         description: MacUIKit commit or branch
         default: main
+      publish:
+        description: Publish (installed copies update to it); otherwise a draft
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -88,7 +92,9 @@ jobs:
             git -C $Path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
             if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
             git -C $Path checkout -q FETCH_HEAD
-            Write-Host "$Repository $Ref = $(git -C $Path rev-parse --short HEAD)"
+            $sha = git -C $Path rev-parse --short HEAD
+            Write-Host "$Repository $Ref = $sha"
+            "$(($Repository -split '/')[1] -replace '-', '_')_sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
             Remove-Item -LiteralPath $keyFile -Force
           }
           git config --global core.autocrlf false
@@ -126,17 +132,28 @@ jobs:
         working-directory: C:\custom\code\keetv2\worker
         run: npm ci --no-audit --no-fund
 
+      # The newest published release: its full package is the base of this one's delta, and its
+      # releases.win.json the feed this one extends. None yet: no delta.
+      - name: Previous release
+        shell: pwsh
+        working-directory: C:\custom\code\keetv2\desktop
+        run: |
+          dotnet tool restore | Out-Null
+          dotnet vpk download github --repoUrl '${{ github.server_url }}/${{ github.repository }}' --outputDir dist\releases
+          if ($LASTEXITCODE) { Write-Host 'No previous release.'; $global:LASTEXITCODE = 0 }
+
       - name: Build and package
         shell: pwsh
         run: pwsh C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version '${{ inputs.version }}'
 
-      - name: Draft release
+      # Installed copies update from published releases only; a draft waits for the owner.
+      - name: Release
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+        working-directory: C:\custom\code\keetv2\desktop
         run: |
-          $dist = 'C:\custom\code\keetv2\desktop\dist'
-          # Setup.exe and the portable zip (keetv2 commits before the installer: one keetv2-<date>.zip).
-          $files = @(Get-ChildItem $dist -File | Where-Object Name -match '^keetv2-.*(\.exe|\.zip)$' | ForEach-Object FullName)
-          if (-not $files) { throw "No package in $dist." }
-          gh release create 'v${{ inputs.version }}' @files --draft --repo '${{ github.repository }}' --target '${{ github.sha }}' --title 'keetv2 ${{ inputs.version }}' --notes 'Built from keetv2 ${{ inputs.keetv2_ref }}, MacUIKit ${{ inputs.macuikit_ref }}.'
+          $publish = if ('${{ inputs.publish }}' -eq 'true') { @('--publish') } else { @() }
+          dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
+            --token '${{ github.token }}' --outputDir dist\releases --tag 'v${{ inputs.version }}' `
+            --releaseName 'keetv2 ${{ inputs.version }}' --targetCommitish '${{ github.sha }}' @publish
+          if ($LASTEXITCODE) { throw 'vpk upload failed.' }
+          Write-Host "keetv2 $env:keetv2_sha, MacUIKit $env:macuikit_sha"
