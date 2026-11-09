@@ -136,5 +136,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $dist = 'C:\custom\code\keetv2\desktop\dist'
-          $files = @(Get-ChildItem $dist -File | Where-Object Name -match '(-Setup\.exe|-portable\.zip)$' | ForEach-Object FullName)
+          # Setup.exe and the portable zip (keetv2 commits before the installer: one keetv2-<date>.zip).
+          $files = @(Get-ChildItem $dist -File | Where-Object Name -match '^keetv2-.*(\.exe|\.zip)$' | ForEach-Object FullName)
+          if (-not $files) { throw "No package in $dist." }
           gh release create 'v${{ inputs.version }}' @files --draft --repo '${{ github.repository }}' --target '${{ github.sha }}' --title 'keetv2 ${{ inputs.version }}' --notes 'Built from keetv2 ${{ inputs.keetv2_ref }}, MacUIKit ${{ inputs.macuikit_ref }}.'
