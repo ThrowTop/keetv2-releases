@@ -83,8 +83,80 @@ jobs:
           path: ffmpeg-keetv2
           retention-days: 1
 
-  windows:
+  # keetv2's Qt6Gui.dll: qtbase 6.12.0 with MacUIKit's synchronized live-resize patch
+  # (tools/qt/qtbase-6.12.0-synchronized-layout-resize.patch), built by keetv2's
+  # desktop/tools/qt-gui/build.ps1 (only the Gui target; every other Qt file comes from the SDK the
+  # Windows job installs). Cached by everything that decides the output (the script's hash, which
+  # pins the qtbase commit, the patch's hash, the MSVC version), so a cache hit is the build a miss
+  # would make. The patch ships in the package as the LGPL requires (licenses/Qt). Only the build
+  # leaves this job, as a one-day artifact, with the MacUIKit commit it fetched: the Windows job
+  # builds that same commit.
+  qt-gui:
     needs: ffmpeg
+    runs-on: windows-2025
+    timeout-minutes: 90
+    outputs:
+      macuikit_sha: ${{ steps.source.outputs.macuikit_sha }}
+    steps:
+      - name: Fetch the build script and the patch
+        id: source
+        shell: pwsh
+        env:
+          KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
+          MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
+          # The commit the FFmpeg job fetched, not the branch again.
+          KEETV2_REF: ${{ needs.ffmpeg.outputs.keetv2_sha }}
+          MACUIKIT_REF: ${{ inputs.macuikit_ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-Source([string]$Repository, [string]$Key, [string]$Ref) {
+            $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
+            $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            $path = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            git init -q $path
+            git -C $path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
+            if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
+            git -C $path checkout -q FETCH_HEAD
+            Remove-Item -LiteralPath $keyFile -Force
+            return $path
+          }
+          $keetv2 = Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF
+          $macuikit = Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF
+          $sha = git -C $macuikit rev-parse HEAD
+          Write-Host "ThrowTop/macuikit $env:MACUIKIT_REF = $sha"
+          "macuikit_sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          $script = Join-Path $env:RUNNER_TEMP 'qt-gui-build.ps1'
+          $patch = Join-Path $env:RUNNER_TEMP 'qtbase-6.12.0-synchronized-layout-resize.patch'
+          Copy-Item -LiteralPath (Join-Path $keetv2 'desktop\tools\qt-gui\build.ps1') -Destination $script
+          Copy-Item -LiteralPath (Join-Path $macuikit 'tools\qt\qtbase-6.12.0-synchronized-layout-resize.patch') -Destination $patch
+          Remove-Item -LiteralPath $keetv2, $macuikit -Recurse -Force
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msvc = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1).Trim()
+          "SCRIPT_HASH=$((Get-FileHash $script).Hash.ToLowerInvariant())" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "PATCH_HASH=$((Get-FileHash $patch).Hash.ToLowerInvariant())" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "MSVC_VERSION=$msvc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: qt-gui
+          key: qt-gui-6.12.0-msvc${{ env.MSVC_VERSION }}-${{ env.PATCH_HASH }}-${{ env.SCRIPT_HASH }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\qt-gui-build.ps1" -Patch "$env:RUNNER_TEMP\qtbase-6.12.0-synchronized-layout-resize.patch" `
+            -Output "$env:GITHUB_WORKSPACE\qt-gui" -Work "$env:RUNNER_TEMP\kqg"
+          if ($LASTEXITCODE) { throw 'Building Qt6Gui.dll failed.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qt-gui-6.12.0
+          path: qt-gui
+          retention-days: 1
+
+  windows:
+    needs: [ffmpeg, qt-gui]
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
@@ -94,9 +166,9 @@ jobs:
           KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
           MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
           INPUTS_KEY: ${{ secrets.INPUTS_DEPLOY_KEY }}
-          # The commit the FFmpeg job fetched, not the branch again.
+          # The commits the FFmpeg and Qt Gui jobs fetched, not the branches again.
           KEETV2_REF: ${{ needs.ffmpeg.outputs.keetv2_sha }}
-          MACUIKIT_REF: ${{ inputs.macuikit_ref }}
+          MACUIKIT_REF: ${{ needs.qt-gui.outputs.macuikit_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           # keetv2 and MacUIKit with their commit history (no older trees or files) for the release
@@ -124,6 +196,12 @@ jobs:
         with:
           name: ffmpeg-keetv2
           path: C:\custom\code\keetv2\desktop\deps\ffmpeg-keetv2-n9.0.2
+
+      # keetv2's CMake takes it from there (cmake/QtGuiDeps.cmake); a release requires it.
+      - uses: actions/download-artifact@v8
+        with:
+          name: qt-gui-6.12.0
+          path: C:\custom\code\keetv2\desktop\deps\qt-gui-6.12.0
 
       - uses: jurplel/install-qt-action@v4
         with:
