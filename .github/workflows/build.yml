@@ -173,15 +173,21 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # keetv2 and MacUIKit with their commit history (no older trees or files) for the release
           # notes; the build inputs as a single commit.
-          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path, [string]$Filter = '--filter=tree:0') {
+          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path, [string]$Filter = '--filter=tree:0', [switch]$Lfs) {
             $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
             [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
             $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
             New-Item -ItemType Directory -Force -Path $Path | Out-Null
             git -C $Path init -q
-            git -C $Path fetch -q $Filter "git@github.com:$Repository.git" $Ref
+            git -C $Path remote add origin "git@github.com:$Repository.git"
+            if ($Lfs) {
+              git -C $Path lfs install --local --skip-repo
+              if ($LASTEXITCODE) { throw "Configuring Git LFS for $Repository failed." }
+            }
+            git -C $Path fetch -q $Filter origin $Ref
             if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
             git -C $Path checkout -q FETCH_HEAD
+            if ($LASTEXITCODE) { throw "Checking out $Repository $Ref failed." }
             $sha = git -C $Path rev-parse --short HEAD
             Write-Host "$Repository $Ref = $sha"
             "$(($Repository -split '/')[1] -replace '-', '_')_sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
@@ -190,7 +196,7 @@ jobs:
           git config --global core.autocrlf false
           Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF 'C:\custom\code\keetv2'
           Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
-          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research' '--depth=1'
+          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research' '--depth=1' -Lfs
 
       - uses: actions/download-artifact@v8
         with:
@@ -283,9 +289,9 @@ jobs:
         # dev.ps1 picks the version when none is given: the downloaded release's plus one patch.
         run: |
           if ($env:VERSION_INPUT -and $env:VERSION_INPUT -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be x.y.z.' }
-          $version = @(if ($env:VERSION_INPUT) { '-Version'; $env:VERSION_INPUT })
-          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package @version -ReleaseNotes $env:RELEASE_NOTES `
-            -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF')
+          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version $env:VERSION_INPUT -ReleaseNotes $env:RELEASE_NOTES `
+            -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF',
+              '-DKEETV2_SF_SYMBOLS_EXPORT=C:/custom/code/macos27-research/sf-symbols/public-attributes-v2.jsonl.gz')
           if ($LASTEXITCODE) { throw 'Packaging failed.' }
           $built = Get-ChildItem C:\custom\code\keetv2\desktop\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
             ForEach-Object { if ($_.Name -match '-(\d+\.\d+\.\d+)-full\.nupkg$') { [version]$Matches[1] } } |
