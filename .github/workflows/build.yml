@@ -237,7 +237,8 @@ jobs:
         run: |
           if ($env:VERSION_INPUT -and $env:VERSION_INPUT -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be x.y.z.' }
           & C:\custom\code\keetv2\desktop_aui\dev.ps1 -Task package -Version $env:VERSION_INPUT -ReleaseNotes $env:RELEASE_NOTES `
-            -CMakeArgument @('-DKEETV2_AUI_TESTS=OFF')
+            -CMakeArgument @('-DKEETV2_AUI_TESTS=OFF',
+              '-DAUI_SF_SYMBOLS_EXPORT=C:/custom/code/macos27-research/sf-symbols/public-attributes-v2.jsonl.gz')
           if ($LASTEXITCODE) { throw 'Packaging failed.' }
           $built = Get-ChildItem C:\custom\code\keetv2\desktop_aui\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
             ForEach-Object { if ($_.Name -match '-(\d+\.\d+\.\d+)-full\.nupkg$') { [version]$Matches[1] } } |
