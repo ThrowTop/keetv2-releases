@@ -8,7 +8,7 @@ Peer-to-peer voice, chat, infinite file sharing and high quality screen sharing 
 
 - **Low latency voice.** In our tests keetv2 arrives over 200 ms ahead of Discord and about 90 ms
   ahead of TeamSpeak on the same sound.
-- **Native.** C++ and Retained Qt with Direct3D 11. Not Electron slop.
+- **Native.** C++ with its own retained UI framework on Direct3D 11. No Qt, not Electron slop.
 - **No servers.** Peers connect directly and every connection is encrypted. Your account lives on
   your devices.
 - **Screen sharing on your GPU.** NVENC, AMF or Quick Sync, H.264, HEVC or AV1, up to 120 fps.

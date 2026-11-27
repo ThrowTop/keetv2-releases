@@ -4,6 +4,10 @@ name: Build
 # deploy keys. Sources are cloned to the same paths as on the owner's PC (the CMake presets and
 # dev.ps1 name them), so keetv2 needs no CI-specific changes. The build log stays on the runner;
 # only dev.ps1's one-line results (and its first error lines on failure) reach this public log.
+#
+# Since 1.0.0 the app is keetv2's desktop_aui/ on AppleUIKit (Clang, no Qt). Releases before 1.0.0
+# were keetv2's desktop/ on MacUIKit (Qt); installed copies of those update to 1.0.0 and later
+# (same package id).
 on:
   workflow_dispatch:
     inputs:
@@ -13,8 +17,8 @@ on:
       keetv2_ref:
         description: keetv2 commit or branch
         default: master
-      macuikit_ref:
-        description: MacUIKit commit or branch
+      appleuikit_ref:
+        description: AppleUIKit commit or branch
         default: main
       publish:
         description: Publish (installed copies update to it); otherwise a draft
@@ -29,6 +33,9 @@ permissions:
 concurrency:
   group: release
   cancel-in-progress: false
+
+env:
+  LLVM_VERSION: 22.1.8
 
 jobs:
   # keetv2's slim LGPL FFmpeg (desktop/tools/ffmpeg/build.sh) in BtbN's build image, as keetv2's
@@ -83,80 +90,8 @@ jobs:
           path: ffmpeg-keetv2
           retention-days: 1
 
-  # keetv2's Qt6Gui.dll: qtbase 6.12.0 with MacUIKit's synchronized live-resize patch
-  # (tools/qt/qtbase-6.12.0-synchronized-layout-resize.patch), built by keetv2's
-  # desktop/tools/qt-gui/build.ps1 (only the Gui target; every other Qt file comes from the SDK the
-  # Windows job installs). Cached by everything that decides the output (the script's hash, which
-  # pins the qtbase commit, the patch's hash, the MSVC version), so a cache hit is the build a miss
-  # would make. The patch ships in the package as the LGPL requires (licenses/Qt). Only the build
-  # leaves this job, as a one-day artifact, with the MacUIKit commit it fetched: the Windows job
-  # builds that same commit.
-  qt-gui:
-    needs: ffmpeg
-    runs-on: windows-2025
-    timeout-minutes: 90
-    outputs:
-      macuikit_sha: ${{ steps.source.outputs.macuikit_sha }}
-    steps:
-      - name: Fetch the build script and the patch
-        id: source
-        shell: pwsh
-        env:
-          KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
-          MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
-          # The commit the FFmpeg job fetched, not the branch again.
-          KEETV2_REF: ${{ needs.ffmpeg.outputs.keetv2_sha }}
-          MACUIKIT_REF: ${{ inputs.macuikit_ref }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          function Get-Source([string]$Repository, [string]$Key, [string]$Ref) {
-            $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
-            [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
-            $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-            $path = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
-            git init -q $path
-            git -C $path fetch -q --depth 1 "git@github.com:$Repository.git" $Ref
-            if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
-            git -C $path checkout -q FETCH_HEAD
-            Remove-Item -LiteralPath $keyFile -Force
-            return $path
-          }
-          $keetv2 = Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF
-          $macuikit = Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF
-          $sha = git -C $macuikit rev-parse HEAD
-          Write-Host "ThrowTop/macuikit $env:MACUIKIT_REF = $sha"
-          "macuikit_sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          $script = Join-Path $env:RUNNER_TEMP 'qt-gui-build.ps1'
-          $patch = Join-Path $env:RUNNER_TEMP 'qtbase-6.12.0-synchronized-layout-resize.patch'
-          Copy-Item -LiteralPath (Join-Path $keetv2 'desktop\tools\qt-gui\build.ps1') -Destination $script
-          Copy-Item -LiteralPath (Join-Path $macuikit 'tools\qt\qtbase-6.12.0-synchronized-layout-resize.patch') -Destination $patch
-          Remove-Item -LiteralPath $keetv2, $macuikit -Recurse -Force
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $msvc = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1).Trim()
-          "SCRIPT_HASH=$((Get-FileHash $script).Hash.ToLowerInvariant())" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "PATCH_HASH=$((Get-FileHash $patch).Hash.ToLowerInvariant())" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "MSVC_VERSION=$msvc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-      - id: cache
-        uses: actions/cache@v6
-        with:
-          path: qt-gui
-          key: qt-gui-6.12.0-msvc${{ env.MSVC_VERSION }}-${{ env.PATCH_HASH }}-${{ env.SCRIPT_HASH }}
-      - name: Build
-        if: steps.cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          & "$env:RUNNER_TEMP\qt-gui-build.ps1" -Patch "$env:RUNNER_TEMP\qtbase-6.12.0-synchronized-layout-resize.patch" `
-            -Output "$env:GITHUB_WORKSPACE\qt-gui" -Work "$env:RUNNER_TEMP\kqg"
-          if ($LASTEXITCODE) { throw 'Building Qt6Gui.dll failed.' }
-      - uses: actions/upload-artifact@v7
-        with:
-          name: qt-gui-6.12.0
-          path: qt-gui
-          retention-days: 1
-
   windows:
-    needs: [ffmpeg, qt-gui]
+    needs: ffmpeg
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
@@ -164,16 +99,17 @@ jobs:
         shell: pwsh
         env:
           KEETV2_KEY: ${{ secrets.KEETV2_DEPLOY_KEY }}
-          MACUIKIT_KEY: ${{ secrets.MACUIKIT_DEPLOY_KEY }}
+          APPLEUIKIT_KEY: ${{ secrets.APPLEUIKIT_DEPLOY_KEY }}
           INPUTS_KEY: ${{ secrets.INPUTS_DEPLOY_KEY }}
-          # The commits the FFmpeg and Qt Gui jobs fetched, not the branches again.
+          # The commit the FFmpeg job fetched, not the branch again.
           KEETV2_REF: ${{ needs.ffmpeg.outputs.keetv2_sha }}
-          MACUIKIT_REF: ${{ needs.qt-gui.outputs.macuikit_sha }}
+          APPLEUIKIT_REF: ${{ inputs.appleuikit_ref }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # keetv2 and MacUIKit with their commit history (no older trees or files) for the release
-          # notes; the build inputs as a single commit.
-          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path, [string]$Filter = '--filter=tree:0', [switch]$Lfs) {
+          # keetv2 with its commit history (no older trees or files) for the release notes;
+          # AppleUIKit in full (dev.ps1 checks its HEAD out with git, which needs its trees and
+          # files once the deploy key is gone); the build inputs as a single commit.
+          function Get-Source([string]$Repository, [string]$Key, [string]$Ref, [string]$Path, [string[]]$Filter = @('--filter=tree:0'), [switch]$Lfs) {
             $keyFile = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
             [IO.File]::WriteAllText($keyFile, ($Key -replace "`r", '') + "`n")
             $env:GIT_SSH_COMMAND = "ssh -i '$($keyFile.Replace('\', '/'))' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
@@ -184,7 +120,7 @@ jobs:
               git -C $Path lfs install --local --skip-repo
               if ($LASTEXITCODE) { throw "Configuring Git LFS for $Repository failed." }
             }
-            git -C $Path fetch -q $Filter origin $Ref
+            git -C $Path fetch -q @Filter origin $Ref
             if ($LASTEXITCODE) { throw "Fetching $Repository $Ref failed." }
             git -C $Path checkout -q FETCH_HEAD
             if ($LASTEXITCODE) { throw "Checking out $Repository $Ref failed." }
@@ -195,32 +131,42 @@ jobs:
           }
           git config --global core.autocrlf false
           Get-Source ThrowTop/keetv2 $env:KEETV2_KEY $env:KEETV2_REF 'C:\custom\code\keetv2'
-          Get-Source ThrowTop/macuikit $env:MACUIKIT_KEY $env:MACUIKIT_REF 'C:\custom\code\MacUIKit'
-          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research' '--depth=1' -Lfs
+          Get-Source ThrowTop/AppleUIKit $env:APPLEUIKIT_KEY $env:APPLEUIKIT_REF 'C:\custom\code\AppleUIKit' @()
+          Get-Source ThrowTop/keetv2-build-inputs $env:INPUTS_KEY main 'C:\custom\code\macos27-research' @('--depth=1') -Lfs
 
       - uses: actions/download-artifact@v8
         with:
           name: ffmpeg-keetv2
-          path: C:\custom\code\keetv2\desktop\deps\ffmpeg-keetv2-n9.0.2
+          path: C:\custom\code\keetv2\desktop_aui\deps\ffmpeg-keetv2-n9.0.2
 
-      # keetv2's CMake takes it from there (cmake/QtGuiDeps.cmake); a release requires it.
-      - uses: actions/download-artifact@v8
+      # AppleUIKit is Clang-only; the presets name clang/clang++ and LLD. The owner's version.
+      - id: llvm-cache
+        uses: actions/cache@v6
         with:
-          name: qt-gui-6.12.0
-          path: C:\custom\code\keetv2\desktop\deps\qt-gui-6.12.0
+          path: C:\LLVM
+          key: llvm-${{ env.LLVM_VERSION }}-win64
+      - name: LLVM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path C:\LLVM\bin\clang++.exe)) {
+            $installer = Join-Path $env:RUNNER_TEMP 'llvm.exe'
+            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/LLVM-$env:LLVM_VERSION-win64.exe" -OutFile $installer
+            Start-Process -FilePath $installer -ArgumentList '/S', '/D=C:\LLVM' -Wait
+          }
+          'C:\LLVM\bin' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & C:\LLVM\bin\clang++.exe --version | Select-Object -First 1
 
-      - uses: jurplel/install-qt-action@v4
+      - uses: jwlawson/actions-setup-cmake@v2
         with:
-          version: 6.12.0
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-          modules: qtimageformats qtshadertools
-          dir: C:\
-          cache: true
-          # aqtinstall 3.3.0 cannot read Qt 6.12's per-compiler repository layout; this is the
-          # head of its open fix (miurahr/aqtinstall#1048). Back to a release once one has it.
-          aqtsource: git+https://github.com/jdpurcell/aqtinstall.git@6f0f842da47c744cdc814cd94da9828d934d7bf0
+          cmake-version: 4.4.x
+
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+
+      # AppleUIKit's SF Symbols catalog is made by a Python script at build time.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.11
 
       - uses: actions/setup-node@v7
         with:
@@ -243,7 +189,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           dotnet tool restore | Out-Null
-          dotnet vpk download github --repoUrl '${{ github.server_url }}/${{ github.repository }}' --outputDir dist\releases
+          dotnet vpk download github --repoUrl '${{ github.server_url }}/${{ github.repository }}' --outputDir ..\desktop_aui\dist\releases
           if ($LASTEXITCODE) {
             # Only "there is no release yet" may go on (the first release, with no delta). Any other
             # failure would build the wrong version, or one installed copies cannot update to.
@@ -254,7 +200,8 @@ jobs:
           }
 
       # The commit subjects since the newest published release, whose notes end in a hidden line
-      # naming the commits it was built from. These subjects become public.
+      # naming the commits it was built from. These subjects become public. A source the previous
+      # release does not name (AppleUIKit before 1.0.0) lists nothing.
       - name: Release notes
         shell: pwsh
         env:
@@ -264,7 +211,7 @@ jobs:
           $global:LASTEXITCODE = 0
           $lines = [System.Collections.Generic.List[string]]::new()
           $built = @()
-          foreach ($source in @(@{ Name = 'keetv2'; Path = 'C:\custom\code\keetv2' }, @{ Name = 'MacUIKit'; Path = 'C:\custom\code\MacUIKit' })) {
+          foreach ($source in @(@{ Name = 'keetv2'; Path = 'C:\custom\code\keetv2' }, @{ Name = 'AppleUIKit'; Path = 'C:\custom\code\AppleUIKit' })) {
             $head = git -C $source.Path rev-parse HEAD
             $built += "$($source.Name) $head"
             $since = if ("$previous" -match "$($source.Name) ([0-9a-f]{40})") { $Matches[1] }
@@ -280,8 +227,8 @@ jobs:
           [IO.File]::WriteAllLines($notes, $lines)
           "RELEASE_NOTES=$notes" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      # No tests or development tools: only what ships. dev.ps1 runs the staged app as installed
-      # (bare PATH, packaged worker) before packing it.
+      # No tests: only what ships. dev.ps1 runs the staged app as installed (bare PATH, packaged
+      # worker) before packing it.
       - name: Build and package
         shell: pwsh
         env:
@@ -289,11 +236,10 @@ jobs:
         # dev.ps1 picks the version when none is given: the downloaded release's plus one patch.
         run: |
           if ($env:VERSION_INPUT -and $env:VERSION_INPUT -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be x.y.z.' }
-          & C:\custom\code\keetv2\desktop\dev.ps1 -Task package -Version $env:VERSION_INPUT -ReleaseNotes $env:RELEASE_NOTES `
-            -CMakeArgument @('-DKEETV2_BUILD_TESTS=OFF', '-DKEETV2_BUILD_TOOLS=OFF',
-              '-DKEETV2_SF_SYMBOLS_EXPORT=C:/custom/code/macos27-research/sf-symbols/public-attributes-v2.jsonl.gz')
+          & C:\custom\code\keetv2\desktop_aui\dev.ps1 -Task package -Version $env:VERSION_INPUT -ReleaseNotes $env:RELEASE_NOTES `
+            -CMakeArgument @('-DKEETV2_AUI_TESTS=OFF')
           if ($LASTEXITCODE) { throw 'Packaging failed.' }
-          $built = Get-ChildItem C:\custom\code\keetv2\desktop\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
+          $built = Get-ChildItem C:\custom\code\keetv2\desktop_aui\dist\releases -Filter 'keetv2-desktop-*-full.nupkg' |
             ForEach-Object { if ($_.Name -match '-(\d+\.\d+\.\d+)-full\.nupkg$') { [version]$Matches[1] } } |
             Sort-Object -Descending | Select-Object -First 1
           "VERSION=$built" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
@@ -308,7 +254,7 @@ jobs:
         run: |
           $publish = @(if ($env:PUBLISH -eq 'true') { '--publish' })
           dotnet vpk upload github --repoUrl '${{ github.server_url }}/${{ github.repository }}' `
-            --token '${{ github.token }}' --outputDir dist\releases --tag "v$env:VERSION" `
+            --token '${{ github.token }}' --outputDir ..\desktop_aui\dist\releases --tag "v$env:VERSION" `
             --releaseName "keetv2 $env:VERSION" --targetCommitish '${{ github.sha }}' @publish
           if ($LASTEXITCODE) { throw 'vpk upload failed.' }
           gh release edit "v$env:VERSION" --repo '${{ github.repository }}' --notes-file $env:RELEASE_NOTES
